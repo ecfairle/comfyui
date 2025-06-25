@@ -36,6 +36,7 @@ def calculate_transformer_depth(prefix, state_dict_keys, state_dict):
 
 def detect_unet_config(state_dict, key_prefix, metadata=None):
     state_dict_keys = list(state_dict.keys())
+    
 
     if '{}joint_blocks.0.context_block.attn.qkv.weight'.format(key_prefix) in state_dict_keys: #mmdit model
         unet_config = {}
@@ -595,9 +596,12 @@ def model_config_from_unet_config(unet_config, state_dict=None):
 
 def model_config_from_unet(state_dict, unet_key_prefix, use_base_if_no_match=False, metadata=None):
     unet_config = detect_unet_config(state_dict, unet_key_prefix, metadata=metadata)
+    print("Detecting UNet config for state keys '{}'".format([k for k in state_dict.keys() if 'patch' in k ]))
     if unet_config is None:
         return None
     model_config = model_config_from_unet_config(unet_config, state_dict)
+    model_config = comfy.supported_models.WAN21_I2V({})
+    print("Detected model config: {}".format(model_config.__class__.__name__ if model_config is not None else "None"))
     if model_config is None and use_base_if_no_match:
         model_config = comfy.supported_models_base.BASE(unet_config)
 

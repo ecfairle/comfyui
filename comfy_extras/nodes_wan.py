@@ -580,14 +580,15 @@ def process_tracks(tracks_np: np.ndarray, frame_size: Tuple[int, int], quant_mul
     visibles = visibles * 2 - 1
 
     trange = torch.linspace(-1, 1, tracks.shape[0]).view(-1, 1, 1, 1).expand(*visibles.shape)
-    
+    print("TRANGE SHAPE", trange.shape, tracks.shape, visibles.shape)
+
     out_ = torch.cat([trange, tracks, visibles], dim=-1).view(121, -1, 4)
     out_0 = out_[:1]
     out_l = out_[1:] # 121 => 120 | 1
     out_l = torch.repeat_interleave(out_l, 2, dim=0)[1::3]  # 120 => 240 => 80
     return torch.cat([out_0, out_l], dim=0)
 
-FIXED_LENGTH = 81
+FIXED_LENGTH = 121
 def pad_pts(tr):
     """Convert list of {x,y} to (FIXED_LENGTH,1,3) array, padding/truncating."""
     pts = np.array([[p['x'], p['y'], 1] for p in tr], dtype=np.float32)
@@ -631,73 +632,82 @@ class WanTrackToVideo:
         # Initialize latent tensor
         latent = torch.zeros([batch_size, 16, ((length - 1) // 4) + 1, height // 8, width // 8], 
                            device=comfy.model_management.intermediate_device())
+        latent = torch.zeros([batch_size, 16, ((length - 1) // 4) + 1, height // 8, width // 8], device=comfy.model_management.intermediate_device())
         
         # Parse tracks from JSON
         tracks_data = parse_json_tracks(tracks)
+        print("PARSED TRACKS DATA", len(tracks_data[0]))
         
         if tracks_data:
             # Convert tracks to tensor format
             arrs = []
             for track in tracks_data:
+                print("TRACK", track)
                 pts = pad_pts(track)
                 arrs.append(pts)
 
             tracks_np = np.stack(arrs, axis=0)
+            print("TRACKS_NP SHAPE", tracks_np.shape)
             processed_tracks = process_tracks(tracks_np, (width, height)).unsqueeze(0)
-            
+            print("PROCESSED SHAPE", processed_tracks.shape)
             # Create a dummy video tensor for motion patching
             # In a real implementation, this would come from the actual video/image data
             if start_image is not None:
                 start_image = comfy.utils.common_upscale(start_image[:length].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
                 image = torch.ones((length, height, width, start_image.shape[-1]), device=start_image.device, dtype=start_image.dtype) * 0.5
                 image[:start_image.shape[0]] = start_image
+                print("START IMAGE SHAPE", image.shape)
+                concat_latent_image = vae.encode(image[:, :, :, :3])
+                print("LATENT IMAGE SHAPE", concat_latent_image.shape)
+
+                # msk = torch.ones(1, 81, height, width, device=start_image.device)
+                # msk[:, 1:] = 0
+                # msk = torch.concat([
+                #     torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]
+                # ],
+                #     dim=1)
+                # msk = msk.view(1, msk.shape[1] // 4, 4, height, width)
+                # msk = msk.transpose(1, 2)[0]
                 
-                msk = torch.ones(1, 81, height, width, device=start_image.device)
-                msk[:, 1:] = 0
-                msk = torch.concat([
-                    torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1), msk[:, 1:]
-                ],
-                    dim=1)
-                msk = msk.view(1, msk.shape[1] // 4, 4, height, width)
-                msk = msk.transpose(1, 2)[0]
-                
-                res = torch.concat([
-                        torch.nn.functional.interpolate(
-                            start_image.permute(0, 3, 1, 2).cpu(), size=(height, width), mode='bicubic').transpose(
-                                0, 1),
-                        torch.zeros(3, 81 - 1, height, width)
-                    ],
-                        dim=1).to(start_image.device)
-                print("TEST", start_image[None].cpu().shape, start_image.permute(0, 3, 1, 2).shape, torch.zeros(3, 81 - 1, height, width).shape, torch.nn.functional.interpolate(
-                            start_image.permute(0, 3, 1, 2).cpu(), size=(height, width), mode='bicubic').transpose(
-                                0, 1).shape, res.shape, res.permute(0,2,3,1).shape, image.shape)
+                # res = torch.concat([
+                #         torch.nn.functional.interpolate(
+                #             start_image.permute(0, 3, 1, 2).cpu(), size=(height, width), mode='bicubic').transpose(
+                #                 0, 1),
+                #         torch.zeros(3, FIXED_LENGTH - 1, height, width)
+                #     ],
+                #         dim=1).to(start_image.device)
+                # print("TEST", start_image[None].cpu().shape, start_image.permute(0, 3, 1, 2).shape, torch.zeros(3, 81 - 1, height, width).shape, torch.nn.functional.interpolate(
+                #             start_image.permute(0, 3, 1, 2).cpu(), size=(height, width), mode='bicubic').transpose(
+                #                 0, 1).shape, res.shape, res.permute(0,2,3,1).shape, image.shape)
             
-                y = vae.encode(
-                    res.permute(1,2,3,0)
-                )
-                print("SHAPES", y.shape, msk.shape)
+                # y = vae.encode(
+                #     res.permute(1,2,3,0)
+                # )
+                # print("SHAPES", y.shape, msk.shape)
                 # y = torch.concat([msk, y])
 
                 try:
-                    motion_patched = patch_motion(processed_tracks, y, temperature, (4, 16), topk)
+                    # motion_patched = patch_motion(processed_tracks, y, temperature, (4, 16), topk)
                     
                     # Add motion features to conditioning
                     positive = node_helpers.conditioning_set_values(positive, 
-                                                                 {"motion_features": motion_patched,
-                                                                  "tracks_data": tracks_tensor})
+                                                                 {"concat_latent_image": concat_latent_image,
+                                                                  "ati_tracks": processed_tracks,
+                                                                  "ati_temperature": temperature,
+                                                                  "ati_topk": topk})
                     negative = node_helpers.conditioning_set_values(negative, 
-                                                                 {"motion_features": motion_patched,
-                                                                  "tracks_data": tracks_tensor})
+                                                                 {"concat_latent_image": concat_latent_image,
+                                                                  "ati_tracks": processed_tracks})
                 except Exception as e:
                     print(f"Warning: Motion patching failed: {e}")
                     # Fall back to basic track conditioning
-                    positive = node_helpers.conditioning_set_values(positive, {"tracks_data": tracks_tensor})
-                    negative = node_helpers.conditioning_set_values(negative, {"tracks_data": tracks_tensor})
+                    positive = node_helpers.conditioning_set_values(positive, {"ati_tracks": processed_tracks})
+                    negative = node_helpers.conditioning_set_values(negative, {"ati_tracks": processed_tracks})
             else:
                 # No start image, just add track data to conditioning
-                positive = node_helpers.conditioning_set_values(positive, {"tracks_data": tracks_tensor})
-                negative = node_helpers.conditioning_set_values(negative, {"tracks_data": tracks_tensor})
-        
+                positive = node_helpers.conditioning_set_values(positive, {"ati_tracks": processed_tracks})
+                negative = node_helpers.conditioning_set_values(negative, {"ati_tracks": processed_tracks})
+
         # Handle clip vision output if provided
         if clip_vision_output is not None:
             positive = node_helpers.conditioning_set_values(positive, {"clip_vision_output": clip_vision_output})
@@ -705,6 +715,7 @@ class WanTrackToVideo:
 
         out_latent = {}
         out_latent["samples"] = latent
+        print("FINAL LATENT SHAPE", latent.shape)
         return (positive, negative, out_latent)
 
 NODE_CLASS_MAPPINGS = {

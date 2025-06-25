@@ -12,6 +12,110 @@ from comfy.ldm.flux.math import apply_rope
 import comfy.ldm.common_dit
 import comfy.model_management
 
+def ind_sel(target: torch.Tensor, ind: torch.Tensor, dim: int = 1):
+    """Index selection utility function"""
+    assert (
+        len(ind.shape) > dim
+    ), "Index must have the target dim, but get dim: %d, ind shape: %s" % (dim, str(ind.shape))
+
+    target = target.expand(
+        *tuple(
+            [ind.shape[k] if target.shape[k] == 1 else -1 for k in range(dim)]
+            + [
+                -1,
+            ]
+            * (len(target.shape) - dim)
+        )
+    )
+
+    ind_pad = ind
+
+    if len(target.shape) > dim + 1:
+        for _ in range(len(target.shape) - (dim + 1)):
+            ind_pad = ind_pad.unsqueeze(-1)
+        ind_pad = ind_pad.expand(*(-1,) * (dim + 1), *target.shape[(dim + 1) : :])
+
+    return torch.gather(target, dim=dim, index=ind_pad)
+
+
+def merge_final(vert_attr: torch.Tensor, weight: torch.Tensor, vert_assign: torch.Tensor):
+    """Merge vertex attributes with weights"""
+    target_dim = len(vert_assign.shape) - 1
+    if len(vert_attr.shape) == 2:
+        assert vert_attr.shape[0] > vert_assign.max()
+        new_shape = [1] * target_dim + list(vert_attr.shape)
+        tensor = vert_attr.reshape(new_shape)
+        sel_attr = ind_sel(tensor, vert_assign.type(torch.long), dim=target_dim)
+    else:
+        assert vert_attr.shape[1] > vert_assign.max()
+        new_shape = [vert_attr.shape[0]] + [1] * (target_dim - 1) + list(vert_attr.shape[1:])
+        tensor = vert_attr.reshape(new_shape)
+        sel_attr = ind_sel(tensor, vert_assign.type(torch.long), dim=target_dim)
+
+    final_attr = torch.sum(sel_attr * weight.unsqueeze(-1), dim=-2)
+    return final_attr
+
+def patch_motion(
+    tracks: torch.FloatTensor,  # (B, T, N, 4)
+    vid: torch.FloatTensor,  # (C, T, H, W)
+    temperature: float = 220.0,
+    vae_divide: tuple = (4, 16),
+    topk: int = 2,
+):
+    """Apply motion patching based on tracks"""
+    with torch.no_grad():
+        _, T, H, W = vid.shape
+        N = tracks.shape[2]
+        _, tracks_xy, visible = torch.split(
+            tracks, [1, 2, 1], dim=-1
+        )  # (B, T, N, 2) | (B, T, N, 1)
+        tracks_n = tracks_xy / torch.tensor([W / min(H, W), H / min(H, W)], device=tracks_xy.device)
+        tracks_n = tracks_n.clamp(-1, 1)
+        visible = visible.clamp(0, 1)
+
+        xx = torch.linspace(-W / min(H, W), W / min(H, W), W)
+        yy = torch.linspace(-H / min(H, W), H / min(H, W), H)
+
+        grid = torch.stack(torch.meshgrid(yy, xx, indexing="ij")[::-1], dim=-1).to(
+            tracks_xy.device
+        )
+
+        tracks_pad = tracks_xy[:, 1:]
+        visible_pad = visible[:, 1:]
+
+        visible_align = visible_pad.view(T - 1, 4, *visible_pad.shape[2:]).sum(1)
+        tracks_align = (tracks_pad * visible_pad).view(T - 1, 4, *tracks_pad.shape[2:]).sum(
+            1
+        ) / (visible_align + 1e-5)
+        dist_ = (
+            (tracks_align[:, None, None] - grid[None, :, :, None]).pow(2).sum(-1)
+        )  # T, H, W, N
+        weight = torch.exp(-dist_ * temperature) * visible_align.clamp(0, 1).view(
+            T - 1, 1, 1, N
+        )
+        vert_weight, vert_index = torch.topk(
+            weight, k=min(topk, weight.shape[-1]), dim=-1
+        )
+
+    grid_mode = "bilinear"
+    point_feature = torch.nn.functional.grid_sample(
+        vid[vae_divide[0]:].permute(1, 0, 2, 3)[:1],
+        tracks_n[:, :1].type(vid.dtype),
+        mode=grid_mode,
+        padding_mode="zeros",
+        align_corners=False,
+    )
+    point_feature = point_feature.squeeze(0).squeeze(1).permute(1, 0) # N, C=16
+
+    out_feature = merge_final(point_feature, vert_weight, vert_index).permute(3, 0, 1, 2) # T - 1, H, W, C => C, T - 1, H, W
+    out_weight = vert_weight.sum(-1) # T - 1, H, W
+
+    # out feature -> already soft weighted
+    mix_feature = out_feature + vid[vae_divide[0]:, 1:] * (1 - out_weight.clamp(0, 1))
+
+    out_feature_full = torch.cat([vid[vae_divide[0]:, :1], mix_feature], dim=1) # C, T, H, W
+    out_mask_full = torch.cat([torch.ones_like(out_weight[:1]), out_weight], dim=0)  # T, H, W
+    return torch.cat([out_mask_full[None].expand(vae_divide[0], -1, -1, -1), out_feature_full], dim=0)
 
 def sinusoidal_embedding_1d(dim, position):
     # preprocess
@@ -552,6 +656,10 @@ class WanModel(torch.nn.Module):
             time_dim_concat = comfy.ldm.common_dit.pad_to_patch_size(time_dim_concat, self.patch_size)
             x = torch.cat([x, time_dim_concat], dim=2)
             t_len = ((x.shape[2] + (patch_size[0] // 2)) // patch_size[0])
+        
+        ati_tracks = kwargs.get("ati_tracks", None)
+        if ati_tracks is not None:
+            x = patch_motion(ati_tracks, x, temperature=220.0, topk=2)
 
         img_ids = torch.zeros((t_len, h_len, w_len, 3), device=x.device, dtype=x.dtype)
         img_ids[:, :, :, 0] = img_ids[:, :, :, 0] + torch.linspace(0, t_len - 1, steps=t_len, device=x.device, dtype=x.dtype).reshape(-1, 1, 1)

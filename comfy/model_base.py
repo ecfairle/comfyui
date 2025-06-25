@@ -1115,6 +1115,13 @@ class WAN21(BaseModel):
         time_dim_concat = kwargs.get("time_dim_concat", None)
         if time_dim_concat is not None:
             out['time_dim_concat'] = comfy.conds.CONDRegular(self.process_latent_in(time_dim_concat))
+        
+        # ati_tracks = kwargs.get("ati_tracks", None)
+        # if ati_tracks is not None:
+        #     out['ati_tracks'] = comfy.conds.CONDRegular(self.process_latent_in(ati_tracks))
+        #     out['ati_topk'] = comfy.conds.CONDRegular(kwargs.get("ati_topk", 2))
+        #     out['ati_temperature'] = comfy.conds.CONDRegular(kwargs.get("ati_temperature", 220.0))
+
 
         return out
 
