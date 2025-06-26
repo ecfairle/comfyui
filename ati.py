@@ -120,7 +120,7 @@ def main():
     with torch.inference_mode():
         cliploader = NODE_CLASS_MAPPINGS["CLIPLoader"]()
         cliploader_38 = cliploader.load_clip(
-            clip_name="umt5-xxl-enc-bf16.safetensors", type="mochi", device="default"
+            clip_name="umt5-xxl-enc-bf16.safetensors", type="wan", device="default"
         )
 
         cliptextencode = NODE_CLASS_MAPPINGS["CLIPTextEncode"]()
