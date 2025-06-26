@@ -658,6 +658,7 @@ class WanModel(torch.nn.Module):
             t_len = ((x.shape[2] + (patch_size[0] // 2)) // patch_size[0])
         
         ati_tracks = kwargs.get("ati_tracks", None)
+        print("ATI TRACKS", ati_tracks)
         if ati_tracks is not None:
             x = patch_motion(ati_tracks, x, temperature=220.0, topk=2)
 
