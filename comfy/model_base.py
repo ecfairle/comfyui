@@ -202,6 +202,7 @@ class BaseModel(torch.nn.Module):
         if len(self.concat_keys) > 0:
             cond_concat = []
             denoise_mask = kwargs.get("concat_mask", kwargs.get("denoise_mask", None))
+            print("DENOISE MASK SHAPE", denoise_mask, kwargs.get("noise", None))
             concat_latent_image = kwargs.get("concat_latent_image", None)
             if concat_latent_image is None:
                 concat_latent_image = kwargs.get("latent_image", None)
@@ -1076,8 +1077,8 @@ class WAN21(BaseModel):
             image = torch.zeros(shape_image, dtype=noise.dtype, layout=noise.layout, device=noise.device)
         else:
             image = utils.common_upscale(image.to(device), noise.shape[-1], noise.shape[-2], "bilinear", "center")
-            for i in range(0, image.shape[1], 16):
-                image[:, i: i + 16] = self.process_latent_in(image[:, i: i + 16])
+            for i in range(0, image.shape[1], 20):
+                image[:, i: i + 20] = self.process_latent_in(image[:, i: i + 20])
             image = utils.resize_to_batch_size(image, noise.shape[0])
 
         if not self.image_to_video or extra_channels == image.shape[1]:
@@ -1099,7 +1100,7 @@ class WAN21(BaseModel):
             if mask.shape[1] == 1:
                 mask = mask.repeat(1, 4, 1, 1, 1)
             mask = utils.resize_to_batch_size(mask, noise.shape[0])
-
+    
         return torch.cat((mask, image), dim=1)
 
     def extra_conds(self, **kwargs):
@@ -1116,7 +1117,94 @@ class WAN21(BaseModel):
         if time_dim_concat is not None:
             out['time_dim_concat'] = comfy.conds.CONDRegular(self.process_latent_in(time_dim_concat))
 
+
         return out
+
+class WAN21_ATI(WAN21):
+    def __init__(self, model_config, model_type=ModelType.FLOW, image_to_video=False, device=None):
+        super(WAN21, self).__init__(model_config, model_type, device=device, unet_model=comfy.ldm.wan.model.WanAtiModel)
+        self.image_to_video = image_to_video
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        ati_tracks = kwargs.get("ati_tracks", None)
+        if ati_tracks is not None:
+            out['ati_tracks'] = comfy.conds.CONDRegular(self.process_latent_in(ati_tracks))
+            out['ati_topk'] = comfy.conds.CONDConstant(kwargs.get("ati_topk", 2))
+            out['ati_temperature'] = comfy.conds.CONDConstant(kwargs.get("ati_temperature", 220.0))
+        return out
+    
+    def concat_cond(self, **kwargs):
+        patch_size = (1, 2, 2)
+        vae_stride = (4, 8, 8)
+
+        generation_height = kwargs.get("generation_height", 480)
+        generation_width = kwargs.get("generation_width", 832)
+        num_frames = kwargs.get("num_frames", 81)
+        image = kwargs.get("concat_latent_image", None)
+        H, W = image.shape[1], image.shape[2]
+        max_area = generation_width * generation_height
+
+        if adjust_resolution:
+            aspect_ratio = H / W
+            lat_h = round(
+            np.sqrt(max_area * aspect_ratio) // vae_stride[1] //
+            patch_size[1] * patch_size[1])
+            lat_w = round(
+                np.sqrt(max_area / aspect_ratio) // vae_stride[2] //
+                patch_size[2] * patch_size[2])
+            h = lat_h * vae_stride[1]
+            w = lat_w * vae_stride[2]
+        else:
+            h = generation_height
+            w = generation_width
+            lat_h = h // 8
+            lat_w = w // 8
+
+        # Step 1: Create initial mask with ones for first frame, zeros for others
+        mask = torch.ones(1, num_frames, lat_h, lat_w, device=device)
+        mask[:, 1:] = 0
+
+        # Step 2: Repeat first frame 4 times and concatenate with remaining frames
+        first_frame_repeated = torch.repeat_interleave(mask[:, 0:1], repeats=4, dim=1)
+        mask = torch.concat([first_frame_repeated, mask[:, 1:]], dim=1)
+
+        # Step 3: Reshape mask into groups of 4 frames
+        mask = mask.view(1, mask.shape[1] // 4, 4, lat_h, lat_w)
+
+        # Step 4: Transpose dimensions and select first batch
+        mask = mask.transpose(1, 2)[0]
+
+        # Calculate maximum sequence length
+        frames_per_stride = (num_frames - 1) // vae_stride[0] + 1
+        patches_per_frame = lat_h * lat_w // (patch_size[1] * patch_size[2])
+        max_seq_len = frames_per_stride * patches_per_frame
+
+        vae.to(device)
+        
+        # Step 2: Create zero padding frames
+        zero_frames = torch.zeros(3, num_frames-1, h, w, device=device)
+
+        # Step 3: Concatenate image with zero frames
+        concatenated = torch.concat([image.to(device), zero_frames, image.to(device)], dim=1).to(device = device, dtype = vae.dtype)
+        # concatenated *= latent_strength
+        y = vae.encode([concatenated], device)[0]
+
+        y = torch.concat([mask, y])
+
+        vae.model.clear_cache()
+        vae.to(offload_device)
+
+        image_embeds = {
+            "image_embeds": y,
+            "clip_context": clip_context,
+            "max_seq_len": max_seq_len,
+            "num_frames": num_frames,
+            "lat_h": lat_h,
+            "lat_w": lat_w,
+        }
+
+        return (image_embeds,)
 
 
 class WAN21_Vace(WAN21):
