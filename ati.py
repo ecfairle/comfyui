@@ -135,7 +135,7 @@ def main():
         )
 
         vaeloader = NODE_CLASS_MAPPINGS["VAELoader"]()
-        vaeloader_39 = vaeloader.load_vae(vae_name="kj-Wan2_1_VAE_fp32.safetensors")
+        vaeloader_39 = vaeloader.load_vae(vae_name="wan_2.1_vae.safetensors")
 
         unetloader = NODE_CLASS_MAPPINGS["UNETLoader"]()
         unetloader_140 = unetloader.load_unet(
@@ -151,7 +151,7 @@ def main():
         )
 
         loadimage = NODE_CLASS_MAPPINGS["LoadImage"]()
-        loadimage_240 = loadimage.load_image(image="example.png")
+        loadimage_240 = loadimage.load_image(image="bd7129b7707661dc1f37ec6a00af5605cca6d18ea51d0d37e26e3ff0d3bdb515 (1).png")
 
         clipvisionloader = NODE_CLASS_MAPPINGS["CLIPVisionLoader"]()
         clipvisionloader_244 = clipvisionloader.load_clip(
@@ -171,7 +171,7 @@ def main():
             length=81,
             batch_size=1,
             temperature=220,
-            topk=10,
+            topk=2,
             positive=get_value_at_index(cliptextencode_6, 0),
             negative=get_value_at_index(cliptextencode_7, 0),
             vae=get_value_at_index(vaeloader_39, 0),

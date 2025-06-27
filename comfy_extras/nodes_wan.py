@@ -552,7 +552,7 @@ def patch_motion(
         align_corners=False,
     )
     print("Point feature shape:", point_feature.shape) 
-    point_feature = point_feature.squeeze(0).squeeze(1).permute(1, 0) # N, C=16
+    point_feature = point_67.;l/feature.squeeze(0).squeeze(1).permute(1, 0) # N, C=16
     print("Point feature after squeeze and permute shape:", point_feature)
 
     out_feature = merge_final(point_feature, vert_weight, vert_index).permute(3, 0, 1, 2) # T - 1, H, W, C => C, T - 1, H, W
@@ -693,16 +693,18 @@ class WanTrackToVideo:
                 y = vae.encode(
                     res.permute(1,2,3,0)[:, :, :, :3]  # T, H, W, C
                 )[0]
-                print("y shape:", res.shape, "msk shape:", msk.shape)
+                print("y shape:", y.shape, "msk shape:", msk.shape)
                 y = torch.concat([msk, y])
 
                 motion_patched = patch_motion(processed_tracks, y, temperature, (4, 16), topk)[None]
-                
+                mask, video = motion_patched[:, 0:4], motion_patched[:, 4:]
                 # Add motion features to conditioning
                 positive = node_helpers.conditioning_set_values(positive, 
-                                                                {"concat_latent_image": motion_patched})
+                                                                {"concat_mask": mask,
+                                                                "concat_latent_image": video})
                 negative = node_helpers.conditioning_set_values(negative, 
-                                                                {"concat_latent_image": motion_patched})
+                                                                {"concat_mask": mask,
+                                                                "concat_latent_image": video})
 
         # Handle clip vision output if provided
         if clip_vision_output is not None:
