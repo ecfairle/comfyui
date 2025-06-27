@@ -1076,8 +1076,8 @@ class WAN21(BaseModel):
             image = torch.zeros(shape_image, dtype=noise.dtype, layout=noise.layout, device=noise.device)
         else:
             image = utils.common_upscale(image.to(device), noise.shape[-1], noise.shape[-2], "bilinear", "center")
-            for i in range(0, image.shape[1], 16):
-                image[:, i: i + 16] = self.process_latent_in(image[:, i: i + 16])
+            for i in range(0, image.shape[1], 20):
+                image[:, i: i + 20] = self.process_latent_in(image[:, i: i + 20])
             image = utils.resize_to_batch_size(image, noise.shape[0])
 
         if not self.image_to_video or extra_channels == image.shape[1]:

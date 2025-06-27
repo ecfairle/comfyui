@@ -543,6 +543,7 @@ def patch_motion(
         )
 
     grid_mode = "bilinear"
+    print("tracks_n shape:", tracks_n.shape)
     point_feature = torch.nn.functional.grid_sample(
         vid[vae_divide[0]:].permute(1, 0, 2, 3)[:1],
         tracks_n[:, :1].type(vid.dtype),
@@ -550,7 +551,9 @@ def patch_motion(
         padding_mode="zeros",
         align_corners=False,
     )
+    print("Point feature shape:", point_feature.shape) 
     point_feature = point_feature.squeeze(0).squeeze(1).permute(1, 0) # N, C=16
+    print("Point feature after squeeze and permute shape:", point_feature)
 
     out_feature = merge_final(point_feature, vert_weight, vert_index).permute(3, 0, 1, 2) # T - 1, H, W, C => C, T - 1, H, W
     out_weight = vert_weight.sum(-1) # T - 1, H, W
@@ -685,13 +688,15 @@ class WanTrackToVideo:
                         zero_frames
                     ],
                         dim=1).to(start_image.device)
-            
+
+                
                 y = vae.encode(
                     res.permute(1,2,3,0)[:, :, :, :3]  # T, H, W, C
                 )[0]
+                print("y shape:", res.shape, "msk shape:", msk.shape)
                 y = torch.concat([msk, y])
 
-                motion_patched = patch_motion(processed_tracks, y, temperature, (4, 16), topk)
+                motion_patched = patch_motion(processed_tracks, y, temperature, (4, 16), topk)[None]
                 
                 # Add motion features to conditioning
                 positive = node_helpers.conditioning_set_values(positive, 
